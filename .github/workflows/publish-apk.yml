@@ -1,0 +1,88 @@
+name: Publish Debug APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'apk-distribution/app-debug.apk'
+      - 'apk-distribution/app-debug.apk.sha256'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate pre-built APK and checksum
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_PATH="apk-distribution/app-debug.apk"
+          SHA_PATH="apk-distribution/app-debug.apk.sha256"
+
+          if [[ ! -s "$APK_PATH" ]]; then
+            echo "::error::Missing or empty pre-built APK at $APK_PATH"
+            exit 1
+          fi
+
+          if [[ ! -f "$SHA_PATH" ]]; then
+            echo "::error::Missing SHA-256 checksum file at $SHA_PATH"
+            exit 1
+          fi
+
+          (
+            cd apk-distribution
+            sha256sum -c app-debug.apk.sha256
+          )
+
+          unzip -tq "$APK_PATH"
+
+          APK_SIZE=$(stat -c%s "$APK_PATH")
+          APK_SHA256=$(sha256sum "$APK_PATH" | awk '{print $1}')
+
+          echo "apk_size=$APK_SIZE" >> "$GITHUB_OUTPUT"
+          echo "apk_sha256=$APK_SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="debug-apk-build-${{ github.run_number }}-${{ github.run_attempt }}"
+
+          (
+            cd apk-distribution
+            gh release create "$TAG" app-debug.apk \
+              --title "Panel VPN Debug APK ($TAG)" \
+              --notes "Pre-built Panel VPN debug APK. SHA-256: \`${{ steps.validate.outputs.apk_sha256 }}\`" \
+              --latest
+          )
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Write job summary
+        shell: bash
+        run: |
+          TAG="${{ steps.release.outputs.tag }}"
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+          {
+            echo "## Panel VPN Debug APK Published"
+            echo ""
+            echo "- **Release Tag:** \`$TAG\`"
+            echo "- **APK Size:** ${{ steps.validate.outputs.apk_size }} bytes"
+            echo "- **SHA-256:** \`${{ steps.validate.outputs.apk_sha256 }}\`"
+            echo "- **Release Page:** $REPO_URL/releases/tag/$TAG"
+            echo "- **Direct Latest Download:** $REPO_URL/releases/latest/download/app-debug.apk"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,343 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    // --- Entity Validation Helpers ---
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+             data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+             data.role == 'SUPER_ADMIN' &&
+             data.panelName is string && data.panelName.size() >= 1 && data.panelName.size() <= 80 &&
+             data.defaultDns is string && data.defaultDns.size() >= 3 && data.defaultDns.size() <= 120 &&
+             data.defaultMtu is int && data.defaultMtu >= 1200 && data.defaultMtu <= 1500 &&
+             data.defaultSubnet is string && data.defaultSubnet.size() >= 5 && data.defaultSubnet.size() <= 40 &&
+             data.autoSuspendExpired is bool &&
+             data.apiTimeoutSeconds is int && data.apiTimeoutSeconds >= 3 && data.apiTimeoutSeconds <= 60 &&
+             data.maskSensitiveKeys is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidVpsServer(data) {
+      return data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             data.ipAddress is string && data.ipAddress.size() >= 3 && data.ipAddress.size() <= 100 &&
+             data.location is string && data.location.size() >= 1 && data.location.size() <= 100 &&
+             data.apiEndpoint is string && data.apiEndpoint.size() <= 300 &&
+             data.apiToken is string && data.apiToken.size() <= 300 &&
+             data.sshPort is int && data.sshPort >= 1 && data.sshPort <= 65535 &&
+             data.wireguardPort is int && data.wireguardPort >= 1 && data.wireguardPort <= 65535 &&
+             data.openVpnPort is int && data.openVpnPort >= 1 && data.openVpnPort <= 65535 &&
+             data.status in ['ONLINE', 'OFFLINE', 'ERROR', 'PENDING'] &&
+             data.cpuPercent is number && data.cpuPercent >= 0 && data.cpuPercent <= 100 &&
+             data.ramUsedMb is int && data.ramUsedMb >= 0 && data.ramUsedMb <= 10000000 &&
+             data.ramTotalMb is int && data.ramTotalMb >= 0 && data.ramTotalMb <= 10000000 &&
+             data.storageUsedGb is int && data.storageUsedGb >= 0 && data.storageUsedGb <= 1000000 &&
+             data.storageTotalGb is int && data.storageTotalGb >= 0 && data.storageTotalGb <= 1000000 &&
+             data.latencyMs is int && data.latencyMs >= 0 && data.latencyMs <= 60000 &&
+             data.activeConnections is int && data.activeConnections >= 0 && data.activeConnections <= 1000000 &&
+             data.wireguardEnabled is bool &&
+             data.openVpnEnabled is bool &&
+             data.lastDiagnostic is string && data.lastDiagnostic.size() <= 500 &&
+             (!('lastCheckedAt' in data) || isValidTimestamp(data.lastCheckedAt)) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidVpnProtocol(data) {
+      return data.serverId is string && data.serverId.size() >= 1 && data.serverId.size() <= 128 &&
+             data.serverName is string && data.serverName.size() >= 1 && data.serverName.size() <= 80 &&
+             data.type in ['WIREGUARD', 'OPENVPN'] &&
+             data.enabled is bool &&
+             data.port is int && data.port >= 1 && data.port <= 65535 &&
+             data.transport in ['UDP', 'TCP'] &&
+             data.subnet is string && data.subnet.size() >= 5 && data.subnet.size() <= 40 &&
+             data.dns is string && data.dns.size() >= 3 && data.dns.size() <= 120 &&
+             data.mtu is int && data.mtu >= 1200 && data.mtu <= 1500 &&
+             data.cipher is string && data.cipher.size() >= 2 && data.cipher.size() <= 60 &&
+             data.keepaliveSeconds is int && data.keepaliveSeconds >= 0 && data.keepaliveSeconds <= 300 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidVpnUser(data) {
+      return data.username is string && data.username.size() >= 2 && data.username.size() <= 60 &&
+             data.email is string && data.email.size() <= 160 &&
+             data.serverId is string && data.serverId.size() >= 1 && data.serverId.size() <= 128 &&
+             data.serverName is string && data.serverName.size() >= 1 && data.serverName.size() <= 80 &&
+             data.protocol in ['WIREGUARD', 'OPENVPN', 'BOTH'] &&
+             data.status in ['ACTIVE', 'SUSPENDED', 'EXPIRED'] &&
+             data.maxDevices is int && data.maxDevices >= 1 && data.maxDevices <= 100 &&
+             data.activeConnections is int && data.activeConnections >= 0 && data.activeConnections <= 1000 &&
+             data.dataLimitGb is int && data.dataLimitGb >= 0 && data.dataLimitGb <= 100000 &&
+             data.dataUsedMb is int && data.dataUsedMb >= 0 && data.dataUsedMb <= 100000000 &&
+             data.expiresAtEpochMs is int && data.expiresAtEpochMs >= 0 &&
+             data.notes is string && data.notes.size() <= 300 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidVpnConfig(data) {
+      return data.vpnUserId is string && data.vpnUserId.size() >= 1 && data.vpnUserId.size() <= 128 &&
+             data.vpnUsername is string && data.vpnUsername.size() >= 1 && data.vpnUsername.size() <= 60 &&
+             data.serverId is string && data.serverId.size() >= 1 && data.serverId.size() <= 128 &&
+             data.serverName is string && data.serverName.size() >= 1 && data.serverName.size() <= 80 &&
+             data.deviceId is string && data.deviceId.size() <= 128 &&
+             data.deviceName is string && data.deviceName.size() >= 1 && data.deviceName.size() <= 80 &&
+             data.protocol in ['WIREGUARD', 'OPENVPN'] &&
+             data.assignedIp is string && data.assignedIp.size() >= 3 && data.assignedIp.size() <= 64 &&
+             data.publicKey is string && data.publicKey.size() <= 128 &&
+             data.privateKey is string && data.privateKey.size() <= 128 &&
+             data.presharedKey is string && data.presharedKey.size() <= 128 &&
+             data.endpoint is string && data.endpoint.size() >= 3 && data.endpoint.size() <= 120 &&
+             data.configContent is string && data.configContent.size() >= 10 && data.configContent.size() <= 8192 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidVpnDevice(data) {
+      return data.vpnUserId is string && data.vpnUserId.size() >= 1 && data.vpnUserId.size() <= 128 &&
+             data.vpnUsername is string && data.vpnUsername.size() >= 1 && data.vpnUsername.size() <= 60 &&
+             data.serverId is string && data.serverId.size() >= 1 && data.serverId.size() <= 128 &&
+             data.deviceName is string && data.deviceName.size() >= 1 && data.deviceName.size() <= 80 &&
+             data.platform in ['ANDROID', 'IOS', 'WINDOWS', 'MACOS', 'LINUX', 'ROUTER'] &&
+             data.assignedIp is string && data.assignedIp.size() >= 3 && data.assignedIp.size() <= 64 &&
+             data.publicKeyFingerprint is string && data.publicKeyFingerprint.size() <= 128 &&
+             data.authorized is bool &&
+             data.connected is bool &&
+             data.lastSeenEpochMs is int && data.lastSeenEpochMs >= 0 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidPanelMember(data) {
+      return data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+             data.role in ['SUPER_ADMIN', 'ADMIN', 'OPERATOR', 'VIEWER'] &&
+             data.status in ['ACTIVE', 'INVITED', 'SUSPENDED'] &&
+             data.twoFactorRequired is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidPanelNotification(data) {
+      return data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+             data.message is string && data.message.size() >= 1 && data.message.size() <= 500 &&
+             data.severity in ['INFO', 'WARNING', 'CRITICAL'] &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 40 &&
+             data.read is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidActivityLog(data) {
+      return data.actorEmail is string && data.actorEmail.size() >= 1 && data.actorEmail.size() <= 160 &&
+             data.action is string && data.action.size() >= 1 && data.action.size() <= 80 &&
+             data.targetType is string && data.targetType.size() >= 1 && data.targetType.size() <= 60 &&
+             data.targetName is string && data.targetName.size() >= 1 && data.targetName.size() <= 120 &&
+             data.details is string && data.details.size() <= 500 &&
+             data.status in ['SUCCESS', 'FAILED'] &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    // --- Collection Rules ---
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'email', 'role', 'panelName', 'defaultDns', 'defaultMtu', 'defaultSubnet', 'autoSuspendExpired', 'apiTimeoutSeconds', 'maskSensitiveKeys', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'email', 'role', 'panelName', 'defaultDns', 'defaultMtu', 'defaultSubnet', 'autoSuspendExpired', 'apiTimeoutSeconds', 'maskSensitiveKeys', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().role == existing().role &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'panelName', 'defaultDns', 'defaultMtu', 'defaultSubnet', 'autoSuspendExpired', 'apiTimeoutSeconds', 'maskSensitiveKeys', 'updatedAt']);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /vpsServers/{serverId} {
+        allow get: if isOwner(userId) && isValidId(serverId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(serverId) &&
+                         incoming().keys().hasAll(['name', 'ipAddress', 'location', 'apiEndpoint', 'apiToken', 'sshPort', 'wireguardPort', 'openVpnPort', 'status', 'cpuPercent', 'ramUsedMb', 'ramTotalMb', 'storageUsedGb', 'storageTotalGb', 'latencyMs', 'activeConnections', 'wireguardEnabled', 'openVpnEnabled', 'lastDiagnostic', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['name', 'ipAddress', 'location', 'apiEndpoint', 'apiToken', 'sshPort', 'wireguardPort', 'openVpnPort', 'status', 'cpuPercent', 'ramUsedMb', 'ramTotalMb', 'storageUsedGb', 'storageTotalGb', 'latencyMs', 'activeConnections', 'wireguardEnabled', 'openVpnEnabled', 'lastDiagnostic', 'lastCheckedAt', 'createdAt', 'updatedAt']) &&
+                         isValidVpsServer(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(serverId) &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidVpsServer(incoming()) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'ipAddress', 'location', 'apiEndpoint', 'apiToken', 'sshPort', 'wireguardPort', 'openVpnPort', 'status', 'cpuPercent', 'ramUsedMb', 'ramTotalMb', 'storageUsedGb', 'storageTotalGb', 'latencyMs', 'activeConnections', 'wireguardEnabled', 'openVpnEnabled', 'lastDiagnostic', 'lastCheckedAt', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(serverId);
+      }
+
+      match /protocols/{protocolId} {
+        allow get: if isOwner(userId) && isValidId(protocolId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(protocolId) &&
+                         incoming().keys().hasAll(['serverId', 'serverName', 'type', 'enabled', 'port', 'transport', 'subnet', 'dns', 'mtu', 'cipher', 'keepaliveSeconds', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['serverId', 'serverName', 'type', 'enabled', 'port', 'transport', 'subnet', 'dns', 'mtu', 'cipher', 'keepaliveSeconds', 'createdAt', 'updatedAt']) &&
+                         isValidVpnProtocol(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(protocolId) &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidVpnProtocol(incoming()) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['serverId', 'serverName', 'type', 'enabled', 'port', 'transport', 'subnet', 'dns', 'mtu', 'cipher', 'keepaliveSeconds', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(protocolId);
+      }
+
+      match /vpnUsers/{vpnUserId} {
+        allow get: if isOwner(userId) && isValidId(vpnUserId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(vpnUserId) &&
+                         incoming().keys().hasAll(['username', 'email', 'serverId', 'serverName', 'protocol', 'status', 'maxDevices', 'activeConnections', 'dataLimitGb', 'dataUsedMb', 'expiresAtEpochMs', 'notes', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['username', 'email', 'serverId', 'serverName', 'protocol', 'status', 'maxDevices', 'activeConnections', 'dataLimitGb', 'dataUsedMb', 'expiresAtEpochMs', 'notes', 'createdAt', 'updatedAt']) &&
+                         isValidVpnUser(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(vpnUserId) &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidVpnUser(incoming()) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['username', 'email', 'serverId', 'serverName', 'protocol', 'status', 'maxDevices', 'activeConnections', 'dataLimitGb', 'dataUsedMb', 'expiresAtEpochMs', 'notes', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(vpnUserId);
+      }
+
+      match /vpnConfigs/{configId} {
+        allow get: if isOwner(userId) && isValidId(configId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(configId) &&
+                         incoming().keys().hasAll(['vpnUserId', 'vpnUsername', 'serverId', 'serverName', 'deviceId', 'deviceName', 'protocol', 'assignedIp', 'publicKey', 'privateKey', 'presharedKey', 'endpoint', 'configContent', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['vpnUserId', 'vpnUsername', 'serverId', 'serverName', 'deviceId', 'deviceName', 'protocol', 'assignedIp', 'publicKey', 'privateKey', 'presharedKey', 'endpoint', 'configContent', 'createdAt', 'updatedAt']) &&
+                         isValidVpnConfig(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(configId) &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidVpnConfig(incoming()) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['deviceName', 'assignedIp', 'endpoint', 'configContent', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(configId);
+      }
+
+      match /devices/{deviceId} {
+        allow get: if isOwner(userId) && isValidId(deviceId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(deviceId) &&
+                         incoming().keys().hasAll(['vpnUserId', 'vpnUsername', 'serverId', 'deviceName', 'platform', 'assignedIp', 'publicKeyFingerprint', 'authorized', 'connected', 'lastSeenEpochMs', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['vpnUserId', 'vpnUsername', 'serverId', 'deviceName', 'platform', 'assignedIp', 'publicKeyFingerprint', 'authorized', 'connected', 'lastSeenEpochMs', 'createdAt', 'updatedAt']) &&
+                         isValidVpnDevice(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(deviceId) &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidVpnDevice(incoming()) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['deviceName', 'platform', 'assignedIp', 'authorized', 'connected', 'lastSeenEpochMs', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(deviceId);
+      }
+
+      match /members/{memberId} {
+        allow get: if isOwner(userId) && isValidId(memberId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(memberId) &&
+                         incoming().keys().hasAll(['name', 'email', 'role', 'status', 'twoFactorRequired', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['name', 'email', 'role', 'status', 'twoFactorRequired', 'createdAt', 'updatedAt']) &&
+                         isValidPanelMember(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(memberId) &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidPanelMember(incoming()) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'email', 'role', 'status', 'twoFactorRequired', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(memberId);
+      }
+
+      match /notifications/{notificationId} {
+        allow get: if isOwner(userId) && isValidId(notificationId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(notificationId) &&
+                         incoming().keys().hasAll(['title', 'message', 'severity', 'category', 'read', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['title', 'message', 'severity', 'category', 'read', 'createdAt', 'updatedAt']) &&
+                         isValidPanelNotification(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(notificationId) &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidPanelNotification(incoming()) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['read', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(notificationId);
+      }
+
+      match /activityLogs/{logId} {
+        allow get: if isOwner(userId) && isValidId(logId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(logId) &&
+                         incoming().keys().hasAll(['actorEmail', 'action', 'targetType', 'targetName', 'details', 'status', 'createdAt']) &&
+                         incoming().keys().hasOnly(['actorEmail', 'action', 'targetType', 'targetName', 'details', 'status', 'createdAt']) &&
+                         isValidActivityLog(incoming());
+
+        // Audit logs are immutable after creation
+        allow update: if false;
+        allow delete: if isOwner(userId) && isValidId(logId);
+      }
+    }
+  }
+}

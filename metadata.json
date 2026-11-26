@@ -1,0 +1,6 @@
+{
+  "name": "Panel VPN",
+  "description": "Panel profesional de administración para infraestructura VPN propia con gestión de servidores VPS, protocolos WireGuard/OpenVPN, usuarios, dispositivos, generador de configuraciones y QR.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
