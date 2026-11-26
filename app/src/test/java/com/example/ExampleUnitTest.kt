@@ -40,4 +40,15 @@ class ExampleUnitTest {
         assertTrue(client.normalizeAndValidateBaseUrl("ftp://bad.host").isFailure)
         assertTrue(client.normalizeAndValidateBaseUrl("").isFailure)
     }
+
+    @Test
+    fun vpsApiClient_generatesTokenAndInstallerScript() {
+        val token = VpsApiClient.generateAgentToken()
+        assertTrue(token.length == 48)
+        val script = VpsApiClient.buildOneClickVpsInstallerScript(token, wireguardPort = 51820L, agentPort = 8443L)
+        assertTrue(script.contains("VPN_TOKEN=\"$token\""))
+        assertTrue(script.contains("WG_PORT=\"51820\""))
+        assertTrue(script.contains("/api/v1/wireguard/peers"))
+        assertTrue(script.contains("wg-quick@wg0"))
+    }
 }

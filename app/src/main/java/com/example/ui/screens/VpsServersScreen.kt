@@ -333,16 +333,18 @@ fun VpsServersScreen(
 
     if (showAgentSpecDialog) {
         val clipboard = LocalClipboardManager.current
+        val autoToken = remember { VpsApiClient.generateAgentToken() }
+        val installer = remember(autoToken) { VpsApiClient.buildOneClickVpsInstallerScript(autoToken) }
         AlertDialog(
             onDismissRequest = { showAgentSpecDialog = false },
-            title = { Text("API del Agente VPS") },
+            title = { Text("Instalador 1-Clic para tu VPS") },
             text = {
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "Despliega este micro-agente Node.js (o compatible HTTP JSON) en tu VPS para recibir telemetría real de CPU, RAM, disco y gestión de peers:",
+                        text = "Pega este script como root en tu VPS (Ubuntu/Debian). Instala WireGuard + el agente API con el token $autoToken:",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )
@@ -352,7 +354,7 @@ fun VpsServersScreen(
                         border = BorderStroke(1.dp, SlateBorder)
                     ) {
                         Text(
-                            text = VpsApiClient.VPS_AGENT_SPEC_SNIPPET,
+                            text = installer,
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = JetBrainsMonoFontFamily,
                             color = EmeraldOnline,
@@ -364,14 +366,14 @@ fun VpsServersScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        clipboard.setText(AnnotatedString(VpsApiClient.VPS_AGENT_SPEC_SNIPPET))
-                        onNotify("Script de agente VPS copiado")
+                        clipboard.setText(AnnotatedString(installer))
+                        onNotify("Instalador 1-clic y token copiados")
                         showAgentSpecDialog = false
                     }
                 ) {
                     Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("Copiar script")
+                    Text("Copiar instalador")
                 }
             },
             dismissButton = {

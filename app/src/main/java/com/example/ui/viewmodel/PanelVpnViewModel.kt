@@ -11,6 +11,7 @@ import com.example.data.model.LogStatus
 import com.example.data.model.NotificationSeverity
 import com.example.data.model.PanelMember
 import com.example.data.model.PanelNotification
+import com.example.data.model.ProtocolSelection
 import com.example.data.model.UiState
 import com.example.data.model.UserProfile
 import com.example.data.model.VpnConfigProfile
@@ -23,6 +24,7 @@ import com.example.data.model.VpsServer
 import com.example.data.model.VpsStatus
 import com.example.data.remote.VpsApiClient
 import com.example.data.remote.VpsPeerProvisionRequest
+import com.example.data.remote.VpsProbeResult
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
@@ -271,6 +273,7 @@ class PanelVpnViewModel(
             val port = if (protocol == VpnProtocolType.WIREGUARD) server.wireguardPort else server.openVpnPort
             var serverPublicKey = WireGuardCrypto.generateServerPublicKeyPreview()
             var remoteNote = ""
+            var serverConfigContent: String? = null
 
             if (pushToVpsAgent && server.apiEndpoint.isNotBlank()) {
                 val remoteRes = vpsApiClient.provisionPeerOnVps(
@@ -290,13 +293,16 @@ class PanelVpnViewModel(
                     if (!resp.serverPublicKey.isNullOrBlank()) {
                         serverPublicKey = resp.serverPublicKey
                     }
+                    if (!resp.configContent.isNullOrBlank()) {
+                        serverConfigContent = resp.configContent
+                    }
                     remoteNote = " • Sincronizado con agente VPS"
                 }.onFailure { err ->
                     remoteNote = " • Guardado local (VPS: ${err.localizedMessage})"
                 }
             }
 
-            val configText = if (protocol == VpnProtocolType.WIREGUARD) {
+            val configText = serverConfigContent ?: if (protocol == VpnProtocolType.WIREGUARD) {
                 WireGuardCrypto.buildWireGuardConfig(
                     clientPrivateKey = keys.privateKeyBase64,
                     assignedIp = assignedIp,
@@ -356,6 +362,210 @@ class PanelVpnViewModel(
                 }
                 .onFailure { _events.tryEmit(it.localizedMessage ?: "Error al crear conexión") }
             _isBusy.value = false
+        }
+    }
+
+    fun quickCreateVpnFromVps(
+        vpsIpOrHost: String,
+        vpsName: String,
+        vpsLocation: String,
+        apiEndpoint: String,
+        apiToken: String,
+        wireguardPort: Long,
+        openVpnPort: Long,
+        protocol: VpnProtocolType,
+        deviceName: String,
+        platform: DevicePlatform,
+        onReady: (VpnConfigProfile, VpsProbeResult?) -> Unit
+    ) {
+        viewModelScope.launch {
+            _isBusy.value = true
+            try {
+                val cleanHost = vpsIpOrHost.trim()
+                val existingServers = (vpsServersState.value as? UiState.Success)?.data.orEmpty()
+                val existingUsers = (vpnUsersState.value as? UiState.Success)?.data.orEmpty()
+                val existingDevices = (devicesState.value as? UiState.Success)?.data.orEmpty()
+                val profile = (profileState.value as? UiState.Success)?.data
+
+                val normalizedEndpoint = apiEndpoint.trim().ifBlank { "http://$cleanHost:8443" }
+                val cleanName = vpsName.trim().ifBlank { "VPS $cleanHost" }
+                val cleanLocation = vpsLocation.trim().ifBlank { "Servidor Propio" }
+
+                val matchedServer = existingServers.firstOrNull {
+                    it.ipAddress.equals(cleanHost, ignoreCase = true)
+                }
+
+                val server: VpsServer = if (matchedServer != null) {
+                    val updated = matchedServer.copy(
+                        name = if (vpsName.isNotBlank()) cleanName else matchedServer.name,
+                        apiEndpoint = if (apiEndpoint.isNotBlank()) normalizedEndpoint else matchedServer.apiEndpoint.ifBlank { normalizedEndpoint },
+                        apiToken = if (apiToken.isNotBlank()) apiToken.trim() else matchedServer.apiToken,
+                        wireguardPort = wireguardPort,
+                        openVpnPort = openVpnPort,
+                        wireguardEnabled = protocol == VpnProtocolType.WIREGUARD || matchedServer.wireguardEnabled,
+                        openVpnEnabled = protocol == VpnProtocolType.OPENVPN || matchedServer.openVpnEnabled
+                    )
+                    repository.updateVpsServer(updated)
+                    updated
+                } else {
+                    val newServer = VpsServer(
+                        name = cleanName,
+                        ipAddress = cleanHost,
+                        location = cleanLocation,
+                        apiEndpoint = normalizedEndpoint,
+                        apiToken = apiToken.trim(),
+                        wireguardPort = wireguardPort,
+                        openVpnPort = openVpnPort,
+                        wireguardEnabled = protocol == VpnProtocolType.WIREGUARD,
+                        openVpnEnabled = protocol == VpnProtocolType.OPENVPN
+                    )
+                    val newServerId = repository.addVpsServer(newServer).getOrThrow()
+                    newServer.copy(id = newServerId)
+                }
+
+                var probeResult: VpsProbeResult? = null
+                var serverPublicKey = WireGuardCrypto.generateServerPublicKeyPreview()
+                if (server.apiEndpoint.isNotBlank()) {
+                    val probe = vpsApiClient.probeServerHealth(
+                        endpointUrl = server.apiEndpoint,
+                        apiToken = server.apiToken,
+                        timeoutSeconds = currentTimeoutSeconds()
+                    )
+                    probeResult = probe
+                    repository.applyVpsProbeResult(server, probe)
+                    if (!probe.serverPublicKey.isNullOrBlank()) {
+                        serverPublicKey = probe.serverPublicKey
+                    }
+                }
+
+                val cleanDev = deviceName.trim().ifBlank { "Mi Dispositivo" }
+                val autoUsername = cleanDev.lowercase()
+                    .replace(Regex("[^a-z0-9_]"), "_")
+                    .trim('_')
+                    .ifBlank { "vpn_user" }
+                    .take(24)
+
+                val matchedUser = existingUsers.firstOrNull {
+                    it.serverId == server.id && it.username.equals(autoUsername, ignoreCase = true)
+                } ?: existingUsers.firstOrNull { it.serverId == server.id }
+
+                val vpnUser: VpnUser = if (matchedUser != null) {
+                    matchedUser
+                } else {
+                    val newUser = VpnUser(
+                        username = autoUsername,
+                        email = currentUserEmail,
+                        serverId = server.id,
+                        serverName = server.name,
+                        protocol = if (protocol == VpnProtocolType.WIREGUARD) ProtocolSelection.WIREGUARD.name else ProtocolSelection.OPENVPN.name,
+                        status = VpnUserStatus.ACTIVE.name,
+                        maxDevices = 5L,
+                        dataLimitGb = 0L,
+                        expiresAtEpochMs = 0L,
+                        notes = "Creado automáticamente desde Asistente Rápido"
+                    )
+                    val newUserId = repository.addVpnUser(newUser).getOrThrow()
+                    newUser.copy(id = newUserId)
+                }
+
+                val nextOctet = (existingDevices.size + 2).coerceIn(2, 250)
+                val assignedIp = "10.8.0.$nextOctet/32"
+                val dns = profile?.defaultDns ?: "1.1.1.1, 8.8.8.8"
+                val mtu = profile?.defaultMtu ?: 1420L
+                val port = if (protocol == VpnProtocolType.WIREGUARD) server.wireguardPort else server.openVpnPort
+                val keys = WireGuardCrypto.generateKeyPair()
+                var serverConfigContent: String? = null
+                var remoteStatusNote = ""
+
+                if (server.apiEndpoint.isNotBlank()) {
+                    vpsApiClient.provisionPeerOnVps(
+                        endpointUrl = server.apiEndpoint,
+                        apiToken = server.apiToken,
+                        requestPayload = VpsPeerProvisionRequest(
+                            username = vpnUser.username,
+                            deviceName = cleanDev,
+                            protocol = protocol.name,
+                            assignedIp = assignedIp,
+                            publicKey = keys.publicKeyBase64,
+                            presharedKey = keys.presharedKeyBase64
+                        ),
+                        timeoutSeconds = currentTimeoutSeconds()
+                    ).onSuccess { resp ->
+                        if (!resp.serverPublicKey.isNullOrBlank()) {
+                            serverPublicKey = resp.serverPublicKey
+                        }
+                        if (!resp.configContent.isNullOrBlank()) {
+                            serverConfigContent = resp.configContent
+                        }
+                        remoteStatusNote = " • Sincronizado con tu VPS"
+                    }.onFailure {
+                        remoteStatusNote = " • Perfil listo (ejecuta el comando en tu VPS si aún no lo instalas)"
+                    }
+                }
+
+                val configText = serverConfigContent ?: if (protocol == VpnProtocolType.WIREGUARD) {
+                    WireGuardCrypto.buildWireGuardConfig(
+                        clientPrivateKey = keys.privateKeyBase64,
+                        assignedIp = assignedIp,
+                        dns = dns,
+                        mtu = mtu,
+                        serverPublicKey = serverPublicKey,
+                        presharedKey = keys.presharedKeyBase64,
+                        endpointHost = server.ipAddress,
+                        endpointPort = port,
+                        keepalive = 25L
+                    )
+                } else {
+                    WireGuardCrypto.buildOpenVpnConfig(
+                        username = vpnUser.username,
+                        deviceName = cleanDev,
+                        serverIp = server.ipAddress,
+                        port = port,
+                        transport = "UDP",
+                        cipher = "AES-256-GCM",
+                        dns = dns,
+                        keyMaterialSeed = keys.publicKeyBase64.take(24)
+                    )
+                }
+
+                val device = VpnDevice(
+                    vpnUserId = vpnUser.id,
+                    vpnUsername = vpnUser.username,
+                    serverId = server.id,
+                    deviceName = cleanDev,
+                    platform = platform.name,
+                    assignedIp = assignedIp,
+                    publicKeyFingerprint = keys.publicKeyBase64,
+                    authorized = true,
+                    connected = false,
+                    lastSeenEpochMs = System.currentTimeMillis()
+                )
+
+                val config = VpnConfigProfile(
+                    vpnUserId = vpnUser.id,
+                    vpnUsername = vpnUser.username,
+                    serverId = server.id,
+                    serverName = server.name,
+                    deviceName = cleanDev,
+                    protocol = protocol.name,
+                    assignedIp = assignedIp,
+                    publicKey = keys.publicKeyBase64,
+                    privateKey = keys.privateKeyBase64,
+                    presharedKey = keys.presharedKeyBase64,
+                    endpoint = "${server.ipAddress}:$port",
+                    configContent = configText
+                )
+
+                val configId = repository.createConnectionWithDevice(config, device).getOrThrow()
+                _events.tryEmit("¡Tu VPN está lista para descargar!$remoteStatusNote")
+                onReady(config.copy(id = configId), probeResult)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _events.tryEmit(e.localizedMessage ?: "No se pudo crear la VPN")
+            } finally {
+                _isBusy.value = false
+            }
         }
     }
 

@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.RocketLaunch
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -194,6 +195,14 @@ fun DashboardScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Button(
+                            onClick = { onNavigate(PanelSection.QUICK_WIZARD) },
+                            modifier = Modifier.testTag("dash_quick_wizard_btn")
+                        ) {
+                            Icon(Icons.Filled.RocketLaunch, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Crear VPN Fácil")
+                        }
+                        FilledTonalButton(
                             onClick = { onNavigate(PanelSection.VPS_SERVERS) },
                             modifier = Modifier.testTag("dash_add_vps_btn")
                         ) {

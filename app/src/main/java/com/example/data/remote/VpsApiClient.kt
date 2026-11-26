@@ -292,37 +292,202 @@ class VpsApiClient {
     }
 
     companion object {
-        const val VPS_AGENT_SPEC_SNIPPET = """# Agente API Ligero para tu VPS (Node.js / Express)
-# Instalar: npm i express systeminformation
-const express = require('express');
-const si = require('systeminformation');
-const { execFile } = require('child_process');
-const app = express();
-app.use(express.json());
+        private val secureRandom = java.security.SecureRandom()
 
-const API_TOKEN = process.env.VPN_PANEL_TOKEN;
-app.use((req, res, next) => {
-  const auth = req.headers.authorization?.replace('Bearer ', '');
-  if (!API_TOKEN || auth !== API_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
-  next();
-});
+        fun generateAgentToken(): String {
+            val bytes = ByteArray(24)
+            secureRandom.nextBytes(bytes)
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
 
-app.get('/api/v1/health', async (req, res) => {
-  const [cpu, mem, fs] = await Promise.all([si.currentLoad(), si.mem(), si.fsSize()]);
-  res.json({
+        fun buildOneClickVpsInstallerScript(
+            apiToken: String,
+            wireguardPort: Long = 51820L,
+            agentPort: Long = 8443L
+        ): String {
+            val safeToken = apiToken.replace(Regex("[^a-zA-Z0-9_\\-]"), "").ifBlank { "panelvpn_token" }
+            val safeWgPort = wireguardPort.coerceIn(1L, 65535L)
+            val safeAgentPort = agentPort.coerceIn(1L, 65535L)
+            return """#!/usr/bin/env bash
+set -euo pipefail
+
+# Panel VPN - Instalador automatico 1-clic (Ubuntu / Debian)
+export DEBIAN_FRONTEND=noninteractive
+VPN_TOKEN="$safeToken"
+WG_PORT="$safeWgPort"
+AGENT_PORT="$safeAgentPort"
+
+apt-get update -y
+apt-get install -y wireguard wireguard-tools iptables curl ufw nodejs
+
+sysctl -w net.ipv4.ip_forward=1
+grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+
+mkdir -p /etc/wireguard /opt/panel-vpn-agent
+chmod 700 /etc/wireguard
+
+if [ ! -f /etc/wireguard/server_private.key ]; then
+  wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
+  chmod 600 /etc/wireguard/server_private.key
+fi
+
+PRIV_KEY=${'$'}(cat /etc/wireguard/server_private.key)
+PUB_IF=${'$'}(ip -4 route show default | awk '{print ${'$'}5; exit}')
+PUB_IF=${'$'}{PUB_IF:-eth0}
+
+if [ ! -f /etc/wireguard/wg0.conf ]; then
+  cat > /etc/wireguard/wg0.conf <<EOF
+[Interface]
+Address = 10.8.0.1/24
+ListenPort = ${'$'}WG_PORT
+PrivateKey = ${'$'}PRIV_KEY
+SaveConfig = true
+PostUp = iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o ${'$'}PUB_IF -j MASQUERADE
+PostDown = iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o ${'$'}PUB_IF -j MASQUERADE
+EOF
+  chmod 600 /etc/wireguard/wg0.conf
+fi
+
+systemctl enable --now wg-quick@wg0
+
+cat > /opt/panel-vpn-agent/server.js <<'NODE_EOF'
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const { execFileSync, execSync } = require('child_process');
+
+const TOKEN = process.env.VPN_PANEL_TOKEN || '';
+const PORT = Number(process.env.VPN_AGENT_PORT || 8443);
+
+function readServerPubKey() {
+  try { return fs.readFileSync('/etc/wireguard/server_public.key', 'utf8').trim(); }
+  catch { return ''; }
+}
+
+function getTelemetry() {
+  const cpus = os.cpus().length || 1;
+  const load = os.loadavg()[0] || 0;
+  const cpuPercent = Math.min(100, Number(((load / cpus) * 100).toFixed(1)));
+  const ramTotalMb = Math.round(os.totalmem() / 1048576);
+  const ramUsedMb = Math.round((os.totalmem() - os.freemem()) / 1048576);
+  let storageUsedGb = 0, storageTotalGb = 0;
+  try {
+    const df = execSync("df -BG / | tail -1 | awk '{print $2,$3}'").toString().trim().split(/\s+/);
+    storageTotalGb = parseInt(df[0], 10) || 0;
+    storageUsedGb = parseInt(df[1], 10) || 0;
+  } catch {}
+  let activeConnections = 0, wgEnabled = false;
+  try {
+    const out = execSync('wg show wg0 peers').toString().trim();
+    wgEnabled = true;
+    activeConnections = out ? out.split('\n').filter(Boolean).length : 0;
+  } catch {}
+  return {
     status: 'ONLINE',
-    cpuPercent: Number(cpu.currentLoad.toFixed(1)),
-    ramUsedMb: Math.round(mem.active / 1048576),
-    ramTotalMb: Math.round(mem.total / 1048576),
-    storageUsedGb: Math.round((fs[0]?.used || 0) / 1073741824),
-    storageTotalGb: Math.round((fs[0]?.size || 0) / 1073741824),
-    activeConnections: 0,
-    wireguardEnabled: true,
+    cpuPercent,
+    ramUsedMb,
+    ramTotalMb,
+    storageUsedGb,
+    storageTotalGb,
+    activeConnections,
+    wireguardEnabled: wgEnabled,
     openVpnEnabled: false,
-    message: 'Agente VPS operativo'
+    wireguardPublicKey: readServerPubKey(),
+    message: 'Agente Panel VPN operativo'
+  };
+}
+
+const server = http.createServer((req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const auth = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!TOKEN || auth !== TOKEN) {
+    res.writeHead(401);
+    return res.end(JSON.stringify({ error: 'Unauthorized' }));
+  }
+
+  if (req.method === 'GET' && (req.url === '/api/v1/health' || req.url === '/health')) {
+    res.writeHead(200);
+    return res.end(JSON.stringify(getTelemetry()));
+  }
+
+  let body = '';
+  req.on('data', chunk => { body += chunk; if (body.length > 65536) req.destroy(); });
+  req.on('end', () => {
+    try {
+      const payload = body ? JSON.parse(body) : {};
+      if (req.method === 'POST' && req.url === '/api/v1/wireguard/peers') {
+        const pub = String(payload.publicKey || '').trim();
+        const ip = String(payload.assignedIp || '').trim();
+        if (!/^[A-Za-z0-9+/=]{42,46}$/.test(pub) || !/^[0-9./]+$/.test(ip)) {
+          res.writeHead(400);
+          return res.end(JSON.stringify({ ok: false, message: 'Clave o IP invalida' }));
+        }
+        const args = ['set', 'wg0', 'peer', pub, 'allowed-ips', ip];
+        execFileSync('wg', args);
+        execFileSync('wg-quick', ['save', 'wg0']);
+        res.writeHead(200);
+        return res.end(JSON.stringify({
+          ok: true,
+          serverPublicKey: readServerPubKey(),
+          message: 'Peer WireGuard activado'
+        }));
+      }
+      if (req.method === 'POST' && req.url.startsWith('/api/v1/protocols/')) {
+        const enable = Boolean(payload.enabled);
+        execFileSync('systemctl', [enable ? 'start' : 'stop', 'wg-quick@wg0']);
+        res.writeHead(200);
+        return res.end(JSON.stringify({ ok: true }));
+      }
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: 'Not found' }));
+    } catch (err) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, message: err.message }));
+    }
   });
 });
 
-app.listen(8443, '0.0.0.0');"""
+server.listen(PORT, '0.0.0.0', () => console.log('Panel VPN Agent listening on', PORT));
+NODE_EOF
+
+cat > /etc/systemd/system/panel-vpn-agent.service <<EOF
+[Unit]
+Description=Panel VPN HTTP Agent
+After=network.target wg-quick@wg0.service
+
+[Service]
+Environment=VPN_PANEL_TOKEN=${'$'}VPN_TOKEN
+Environment=VPN_AGENT_PORT=${'$'}AGENT_PORT
+ExecStart=/usr/bin/node /opt/panel-vpn-agent/server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now panel-vpn-agent
+
+if command -v ufw >/dev/null 2>&1; then
+  ufw allow ${'$'}WG_PORT/udp || true
+  ufw allow ${'$'}AGENT_PORT/tcp || true
+fi
+
+echo "============================================"
+echo "Panel VPN listo en tu VPS!"
+echo "Endpoint: http://${'$'}(curl -s4 ifconfig.me || hostname -I | awk '{print ${'$'}1}'):${'$'}AGENT_PORT"
+echo "Token: ${'$'}VPN_TOKEN"
+echo "Clave Publica WireGuard: ${'$'}(cat /etc/wireguard/server_public.key)"
+echo "============================================"""
+        }
+
+        const val VPS_AGENT_SPEC_SNIPPET = """# Instalacion rapida en VPS Ubuntu/Debian (copia y pega como root):
+# 1) Genera tu token en el Asistente Rapido o usa uno propio:
+#    export VPN_PANEL_TOKEN="tu_token_seguro"
+# 2) El agente expone:
+#    GET  /api/v1/health             -> CPU, RAM, disco y serverPublicKey
+#    POST /api/v1/wireguard/peers    -> Autoriza clave Curve25519 + IP en wg0
+#    POST /api/v1/protocols/:p/toggle -> Inicia o detiene wg-quick@wg0"""
     }
 }

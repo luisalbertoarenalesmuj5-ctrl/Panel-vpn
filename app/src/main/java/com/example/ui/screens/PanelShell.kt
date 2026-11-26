@@ -258,6 +258,13 @@ fun PanelShell(
                                     onNavigate = { selectedSection = it },
                                     onProbeAll = viewModel::probeAllServers
                                 )
+                                PanelSection.QUICK_WIZARD -> QuickVpnWizardScreen(
+                                    servers = servers,
+                                    isBusy = isBusy,
+                                    onQuickCreateVpn = viewModel::quickCreateVpnFromVps,
+                                    onNavigate = { selectedSection = it },
+                                    onNotify = { msg -> scope.launch { snackbarHostState.showSnackbar(msg) } }
+                                )
                                 PanelSection.VPS_SERVERS -> VpsServersScreen(
                                     servers = servers,
                                     probingIds = probingIds,
